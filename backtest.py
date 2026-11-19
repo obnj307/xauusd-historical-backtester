@@ -23,13 +23,13 @@ def main():
         sys.exit('ERROR: data/XAUUSD_M30.csv fehlt. CSV mit UTC-Zeit und OHLC hochladen.')
     with DATA.open(encoding='utf-8-sig', newline='') as f:
         reader = csv.DictReader(f)
-        required = {'time','open','high','low','close'}
-        if not reader.fieldnames or not required.issubset(reader.fieldnames):
-            sys.exit('ERROR: CSV-Spalten erforderlich: time,open,high,low,close (volume optional)')
+        required = {'open','high','low','close'}
+        if not reader.fieldnames or not required.issubset(reader.fieldnames) or not ({'time','timestamp'} & set(reader.fieldnames)):
+            sys.exit('ERROR: CSV-Spalten erforderlich: timestamp ODER time,open,high,low,close (volume optional)')
         rows=[]
         for line,r in enumerate(reader,2):
             try:
-                t=parse_time(r['time']); o,h,l,c=(float(r[k]) for k in ('open','high','low','close'))
+                t=(datetime.fromtimestamp(int(r['timestamp'])/1000, timezone.utc) if r.get('timestamp') else parse_time(r['time'])); o,h,l,c=(float(r[k]) for k in ('open','high','low','close'))
                 if not (l <= min(o,c) <= max(o,c) <= h) or l<=0:
                     raise ValueError('OHLC inkonsistent')
                 rows.append((t,o,h,l,c))

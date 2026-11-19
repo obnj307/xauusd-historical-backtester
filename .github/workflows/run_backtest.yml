@@ -17,6 +17,8 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Abhängigkeiten installieren
+        run: pip install -r requirements.txt
+
       - name: Backtest starten
         run: python backtest.py
-

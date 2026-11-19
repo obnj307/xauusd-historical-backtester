@@ -22,3 +22,12 @@ jobs:
 
       - name: Backtest starten
         run: python backtest.py
+
+        
+      - name: Backtest Ergebnisse speichern
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xauusd-backtest-2024
+          path: results/
+

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""LG V6.9.20: K16/B4 research backtester for XAUUSD M30.
-Faithful K16 neighbor-selection concept; feature normalization and some broker
-execution assumptions are approximations, not a bit-exact Pine port.
-Requires: pandas, numpy. Runs: python backtest.py
+"""LG V6.9.20 K16/B4 signal audit V2, XAUUSD M30.
+Pine K16 neighbor loop, 4-bar labels, transitions replicated.
+TradingView MLExtensions library feature normalization is NOT verified:
+this is an auditable approximation, NOT a certified exact port.
+Optional TradingView export: data/tradingview_signals.csv with
+time_utc,signal_k16 (BUY/SELL/empty), optionally score_k16.
 """
 import csv
 from pathlib import Path
@@ -69,14 +71,35 @@ def load_data(path):
     return df
 
 def rma(s, n):
-    return s.ewm(alpha=1/n, adjust=False, min_periods=n).mean()
+    """Wilder RMA seeded with SMA, closer to Pine ta.rma than ewm seed."""
+    x = np.asarray(s, dtype=float)
+    out = np.full(len(x), np.nan)
+    finite = np.flatnonzero(np.isfinite(x))
+    if not len(finite):
+        return pd.Series(out, index=s.index)
+    start = int(finite[0])
+    for i in range(start + n - 1, len(x)):
+        chunk = x[i-n+1:i+1]
+        if np.isfinite(chunk).all():
+            out[i] = chunk.mean()
+            for j in range(i+1, len(x)):
+                if np.isfinite(x[j]):
+                    out[j] = (out[j-1]*(n-1)+x[j])/n
+                else:
+                    out[j] = out[j-1]
+            break
+    return pd.Series(out, index=s.index)
 
 def rsi(close, n):
     delta = close.diff()
     gain = rma(delta.clip(lower=0), n)
     loss = rma((-delta).clip(lower=0), n)
     rs = gain / loss.replace(0, np.nan)
-    return (100 - 100 / (1 + rs)).fillna(50)
+    result = 100 - 100 / (1 + rs)
+    result = result.where(loss.ne(0), 100)
+    result = result.where(gain.ne(0), 0)
+    result = result.where(~((gain==0)&(loss==0)), 50)
+    return result
 
 def cci(high, low, close, n):
     tp = (high + low + close)/3
@@ -111,6 +134,9 @@ def normalized(s, length=100):
     mx = s.rolling(length,min_periods=20).max()
     return (100*(s-mn)/(mx-mn).replace(0,np.nan)).clip(0,100)
 
+def smooth_ema(s, n):
+    return s if n == 1 else s.ewm(span=n, adjust=False, min_periods=n).mean()
+
 def indicators(df):
     h,l,c = df.high,df.low,df.close
     ad, atr = adx(h,l,c,20)
@@ -119,8 +145,8 @@ def indicators(df):
     features = np.column_stack([
         rsi(c,14).to_numpy(),
         normalized(wavetrend(h,l,c,10,11)).to_numpy(),
-        normalized(cci(h,l,c,20)).to_numpy(),
-        ad.to_numpy(),
+        normalized(smooth_ema(cci(h,l,c,20),1)).to_numpy(),
+        smooth_ema(ad,2).to_numpy(),
         rsi(c,9).to_numpy()
     ])
     return features, atr14.to_numpy()
@@ -144,6 +170,7 @@ def k16_signals(df, features):
             continue
         distances = np.log1p(np.abs(features[js]-f)).sum(axis=1)
         # stable sort: earlier candidate wins ties, like Pine insertion order
+        # Pine loops h ascending, inserts on strict "<", so ties preserve h order.
         nearest = np.argsort(distances,kind="stable")[:NEIGHBORS]
         chosen = js[nearest]
         labels = np.sign(close[chosen+4]-close[chosen])
@@ -172,7 +199,40 @@ def export_signal_audit(df, scores):
     pd.DataFrame(records).to_csv(OUT / "signals_python.csv", index=False)
     print("Signal-Audit:", OUT / "signals_python.csv")
     print("K16-Signalwechsel:", sum(bool(x["signal_k16"]) for x in records))
+    compare_exports(pd.DataFrame(records))
 
+
+def compare_exports(current):
+    """Compare timestamp-matched signals. Never claim exactness without TV file."""
+    old = Path("data/signals_python_old.csv")
+    tv = Path("data/tradingview_signals.csv")
+    for path, label in ((old, "Vorherige Python-Version"),
+                        (tv, "TradingView")):
+        if not path.is_file():
+            print(f"{label}: keine Vergleichsdatei ({path})")
+            continue
+        other = pd.read_csv(path, keep_default_na=False)
+        if not {"time_utc","signal_k16"}.issubset(other.columns):
+            print(f"{label}: Spalten time_utc,signal_k16 fehlen")
+            continue
+        other["time_utc"] = pd.to_datetime(other["time_utc"],utc=True,errors="coerce")
+        cur = current.copy()
+        cur["time_utc"] = pd.to_datetime(cur["time_utc"],utc=True)
+        other["signal_k16"] = other["signal_k16"].fillna("").astype(str).str.upper().str.strip()
+        joined = cur.merge(other[["time_utc","signal_k16"]],on="time_utc",
+                           how="inner",suffixes=("_new","_reference"))
+        if joined.empty:
+            print(f"{label}: Keine gemeinsamen UTC-Zeitstempel")
+            continue
+        agree = joined.signal_k16_new.eq(joined.signal_k16_reference)
+        mismatches = joined.loc[~agree].copy()
+        mismatches.to_csv(OUT/("diff_tradingview.csv" if path==tv else "diff_python_old.csv"),index=False)
+        print(f"{label}: {len(joined)} gemeinsame Kerzen, "
+              f"{int(agree.sum())} gleiche Signale ({agree.mean()*100:.2f}%), "
+              f"{len(mismatches)} Unterschiede")
+        if path == tv and len(joined) != len(cur):
+            print("WARNUNG: TradingView-Abdeckung unvollständig; "
+                  "Trefferquote gilt nur für gemeinsame Kerzen.")
 
 def simulate(df,scores,atr):
     OUT.mkdir(exist_ok=True)
@@ -287,6 +347,8 @@ def simulate(df,scores,atr):
     print("Abgelehnte Entries:",rejected,"Stop-outs:",stopouts,
           "Trading angehalten:",halted)
     print("Trade-Log:",OUT/"trades.csv")
+    print("ACHTUNG: Kein nachgewiesen exakter TradingView-Port. "
+          "Vergleich erst mit TV-Signalexport belastbar.")
 
 if __name__=="__main__":
     df=load_data(find_csv())

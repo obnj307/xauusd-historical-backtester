@@ -150,6 +150,30 @@ def k16_signals(df, features):
         scores[i] = np.sign(labels.sum()).astype(np.int8)
     return scores
 
+def export_signal_audit(df, scores):
+    """Export exact K16 transition rules, approximate feature inputs."""
+    state = 0
+    records = []
+    for i in range(len(df)):
+        t = df.time.iloc[i]
+        if not (pd.Timestamp(START, tz="UTC") <= t < pd.Timestamp(END, tz="UTC")):
+            continue
+        score = int(scores[i])
+        signal = ""
+        if score == 1 and state != 1:
+            signal = "BUY"
+        elif score == -1 and state != -1:
+            signal = "SELL"
+        if score != 0:
+            state = score
+        records.append({"time_utc": t.isoformat(), "score_k16": score,
+                        "signal_k16": signal, "state_k16": state})
+    OUT.mkdir(exist_ok=True)
+    pd.DataFrame(records).to_csv(OUT / "signals_python.csv", index=False)
+    print("Signal-Audit:", OUT / "signals_python.csv")
+    print("K16-Signalwechsel:", sum(bool(x["signal_k16"]) for x in records))
+
+
 def simulate(df,scores,atr):
     OUT.mkdir(exist_ok=True)
     rows = []
@@ -269,4 +293,5 @@ if __name__=="__main__":
     print("Kerzen:",len(df),"von",df.time.iloc[0],"bis",df.time.iloc[-1])
     features,atr=indicators(df)
     scores=k16_signals(df,features)
+    export_signal_audit(df,scores)
     simulate(df,scores,atr)
